@@ -28,7 +28,10 @@ different, real problem on its own.
 1. Uploads the broken manual to a session.
 2. **Renumber step**: asks SuperDocs to renumber the ten Section headings
    sequentially 1-10, in the order they already appear, without touching
-   titles, body text, or the Table of Contents.
+   titles, body text, or the Table of Contents. Wrapped in a
+   verify-then-retry loop (up to 3 attempts, each from a fresh session and
+   a fresh copy of the source) since this exact instruction showed real
+   run-to-run non-determinism -- see [Verified result](#verified-result-fail-and-a-genuinely-interesting-one).
 3. **Cross-reference step**: asks SuperDocs to find two body sentences
    that reference another Section by number and correct each number to
    match its target Section's new, corrected number.
@@ -108,39 +111,68 @@ attempt would be spending operations on a re-roll with no new diagnostic
 basis, not a verified fix. Full turn-by-turn diagnosis, including the
 exact job diffs, is in [`PROGRESS.md`](PROGRESS.md).
 
-| Check | Run 1 | Run 2 |
-|---|---|---|
-| Headings renumbered 1-10 sequentially | PASS | FAIL |
-| Titles unchanged and in order | PASS | FAIL |
-| Confidentiality cross-ref -> Section 8 | PASS | FAIL |
-| Termination cross-ref -> Section 9 | PASS | FAIL |
-| TOC: stale title fixed | FAIL | FAIL |
-| TOC: stale number fixed | FAIL | FAIL |
-| TOC: missing entry added | FAIL | FAIL |
-| TOC: exactly 10 entries | FAIL | FAIL |
-| **Overall** | **FAIL (6/8)** | **FAIL (0/8)** |
+| Check | Run 1 | Run 2 | Run 3 (retry wrapper) |
+|---|---|---|---|
+| Headings renumbered 1-10 sequentially | PASS | FAIL | PASS |
+| Titles unchanged and in order | PASS | FAIL | PASS |
+| Confidentiality cross-ref -> Section 8 | PASS | FAIL | PASS |
+| Termination cross-ref -> Section 9 | PASS | FAIL | PASS |
+| TOC: stale title fixed | FAIL | FAIL | FAIL |
+| TOC: stale number fixed | FAIL | FAIL | FAIL |
+| TOC: missing entry added | FAIL | FAIL | FAIL |
+| TOC: exactly 10 entries | FAIL | FAIL | FAIL |
+| **Overall** | **FAIL (6/8)** | **FAIL (0/8)** | **FAIL (4/8)** |
+
+### Run 3: a verify-then-retry wrapper around the one non-deterministic step
+
+Run 1 and Run 2 used the byte-identical renumber instruction and got very
+different results -- real non-determinism, not a wording problem. Run 3
+wraps just that step (the only one that showed non-determinism) in a
+verify-then-retry loop: each attempt starts from a fresh session and a
+fresh copy of the source document, and the result gets checked against
+ground truth before deciding whether to keep it or discard and try again,
+up to 3 attempts. Cross-refs and TOC are unchanged, single-shot turns.
+
+It converged on the first attempt: `[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]`,
+correct, no retry needed. That's a real result, not a non-event -- Run 1
+already showed the instruction can succeed cleanly; Run 3 confirms it
+again under the same fresh-session conditions. Every attempt's real
+outcome is logged to `output/renumber_attempts.json` regardless of
+whether a given run needs 1 attempt or all 3.
+
+The Table of Contents step failed again, the same way as Run 2: no edits
+to any of the nine existing TOC lines, and an empty auto-generated
+`<div class="table-of-contents">` widget inserted instead. Two real runs
+that reached this step, two different instruction phrasings, the same
+outcome both times -- this now reads as a specific, reproducible platform
+behavior around editing a literal, hand-authored Table of Contents,
+not a fluke. Out of scope for this pass (the retry wrapper was scoped to
+renumbering only); fixing the TOC step is separate, not-yet-scoped work.
 
 ## Honest limitations
 
-- Structural repair (renumbering, cross-reference correction) is not
-  reliable run-to-run against the live API today, based on two identical
-  attempts producing very different outcomes. This isn't a claim about
-  SuperDocs generally -- it's what two real runs of this specific,
-  narrowly-scoped task actually showed.
-- The Table of Contents step in particular showed a second, distinct
-  behavior worth flagging on its own: given a literal, hand-authored TOC
-  to edit, it can replace the whole thing with an empty auto-generated
-  widget rather than editing the existing text -- something this build's
-  HTML-based verification has no way to see through.
+- Single-shot structural repair (renumbering specifically) was not
+  reliable run-to-run against the live API, based on two identical
+  attempts producing very different outcomes. The retry wrapper (Run 3)
+  mitigates this for renumbering by discarding a failed attempt and
+  trying again fresh, up to 3 times -- but that's a mitigation, not proof
+  the underlying non-determinism is gone; a run where all 3 attempts fail
+  is still possible and would be reported honestly if it happened.
+- The Table of Contents step still fails, the same way, on both real runs
+  that reached it: given a literal, hand-authored TOC to edit, it replaces
+  the whole thing with an empty auto-generated widget rather than editing
+  the existing text -- something this build's HTML-based verification has
+  no way to see through, and not yet mitigated (out of scope for the
+  retry-wrapper pass).
 - `output/` is gitignored; run `python build.py` to regenerate
-  `repaired_manual.docx`, `final_document.html`, and
-  `verification_result.json`. Regenerating may reproduce either the Run 1
-  or Run 2 outcome, per the finding above.
+  `repaired_manual.docx`, `final_document.html`,
+  `verification_result.json` (now also carries the renumber retry log),
+  and `renumber_attempts.json`.
 
 ## Files
 
-- `build.py` -- upload -> renumber -> fix cross-refs -> fix TOC ->
-  verify -> export flow, plus `--dry-run`
+- `build.py` -- upload -> renumber (verify-then-retry, up to 3 attempts)
+  -> fix cross-refs -> fix TOC -> verify -> export flow, plus `--dry-run`
 - `content/manual.html` -- the driver safety manual, authored with the
   three planted structural defects described above
 - `PROGRESS.md` -- full diagnostic trace of both runs, including the

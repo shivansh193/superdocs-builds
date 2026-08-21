@@ -149,3 +149,62 @@ where the standing instruction says to stop rather than continue.
 `output/verification_result.json` and `output/final_document.html` are
 left as Run 2 produced them -- an accurate record of the failure, not
 patched over.
+
+## 2026-08-21 -- a verify-then-retry wrapper around the one non-deterministic step
+
+Everything above stays as it happened. This is a third run, with a
+different mitigation targeted specifically at the non-determinism, not a
+replacement for the earlier two.
+
+The renumber step is the one that showed non-determinism. Wrapped just
+that step in a loop: each attempt uploads a *fresh* copy of the source
+document into a *fresh* session (not a follow-up turn on a half-broken
+document -- a genuinely independent attempt, matching how the original
+two runs were also independent), sends the same `RENUMBER_INSTRUCTION`,
+and checks the result against ground truth with a new `verify_headings()`
+function (numbers 1-10 in order, titles unchanged) before deciding
+whether to keep it or discard and retry, up to `MAX_RENUMBER_ATTEMPTS = 3`.
+The cross-reference and Table of Contents turns are unchanged and stay
+single-shot -- the non-determinism only ever showed up in renumbering.
+
+`verify_headings()` was checked against known ground truth before spending
+any API calls on it, same discipline as the original `verify()`: run
+against a hand-repaired copy (all correct) and the original broken source
+(all incorrect), both came back as expected.
+
+**Result: converged immediately, attempt 1 of 3.** Real run against the
+live API: `attempt 1 numbers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] correct: True`.
+No retry was needed this time -- which is itself real information, not a
+non-event: it means the instruction *can* succeed reliably when nothing
+else changes, consistent with Run 1's original clean pass. The retry
+wrapper's actual value would show up on a run where the first attempt
+fails and a later one succeeds, or where all three fail and that gets
+reported honestly instead of silently retried into oblivion; this run
+didn't need to exercise that path, but the mechanism is now in place and
+its per-attempt log (`output/renumber_attempts.json`) makes every
+attempt's real outcome inspectable regardless of which path a given run
+takes.
+
+**The Table of Contents step failed again, the same way as before, now
+confirmed twice.** Cross-refs and headings this run: clean. The TOC step,
+asked to fix the same three planted defects, made no edit at all to any
+of the nine existing `<p id="toc-N">` lines -- same stale title, same
+duplicated/wrong number, same missing tenth entry as the unmodified
+source. Instead it inserted an empty `<div class="table-of-contents"
+data-toc=""></div>` widget in the middle of the list (this time between
+the first and second entries; last time, replacing the whole block). This
+happened on the only two real runs that got far enough to reach this
+step, with different instruction wording each time (bundled, then
+single-shot) -- reasonable evidence this is a specific, reproducible
+platform behavior (asking to edit a literal, hand-authored Table of
+Contents triggers a native "live TOC" substitution instead) rather than a
+fluke. Left as-is per the current priority order, which scoped the retry
+wrapper to renumbering only -- fixing the TOC step is separate,
+not-yet-scoped work.
+
+**Final result: FAIL, 4 of 8** (`headings_sequential_1_to_10`,
+`titles_unchanged_and_in_order`, both crossref checks: PASS; all four TOC
+checks: FAIL). `output/repaired_manual.docx`,
+`output/verification_result.json` (now also carries `renumber_attempts`
+and `renumber_converged`), and `output/renumber_attempts.json` all
+reflect this run.
