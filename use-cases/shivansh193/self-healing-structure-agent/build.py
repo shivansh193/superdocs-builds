@@ -22,6 +22,19 @@ they're already in the right order -- only the numbers are wrong. That
 makes verification exact rather than approximate: the correct final state
 is fully known in advance, not just "plausible."
 
+Two real runs of the byte-identical RENUMBER_INSTRUCTION produced very
+different outcomes (see PROGRESS.md): one clean pass, one run with a false
+"updated all 10 sections" claim covering near-zero real progress. That's
+real run-to-run non-determinism, not a wording problem -- so this version
+wraps the renumber turn specifically in a verify-then-retry loop: run it
+against a fresh session and a fresh copy of the source document, check the
+actual resulting headings against ground truth, and if it doesn't match,
+throw the attempt away and try again from scratch, up to
+MAX_RENUMBER_ATTEMPTS times. Every attempt's real outcome is logged,
+whether or not retrying converges to a pass -- both are real information.
+The cross-reference and Table of Contents turns are left single-shot; the
+non-determinism only showed up in renumbering.
+
 Run `python build.py --dry-run` first: prints the full plan with zero API
 calls. Only run for real (`python build.py`) after reading that output.
 """
@@ -45,6 +58,8 @@ HERE = Path(__file__).parent
 CONTENT_DIR = HERE / "content"
 OUTPUT_DIR = HERE / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+MAX_RENUMBER_ATTEMPTS = 3
 
 
 def log(msg: str) -> None:
@@ -200,13 +215,19 @@ def print_dry_run() -> None:
     print("    Reporting's entry), correct final number is 6")
     print("  TOC: no entry at all for the 10th Section ('Miscellaneous Provisions')")
     print()
-    print("Chat instruction 1 (renumber headings only, no document_id set):")
+    print(f"Chat instruction 1 (renumber headings only, no document_id set), retried up to")
+    print(f"{MAX_RENUMBER_ATTEMPTS} times against a fresh session + fresh document each attempt,")
+    print("verified against ground truth after every attempt, since this exact instruction produced")
+    print("two very different real outcomes on two identical prior runs (see PROGRESS.md):")
     print(f"  {RENUMBER_INSTRUCTION[:200]}...")
     print()
-    print("Chat instruction 2 (fix the two body cross-refs against the corrected numbers, only):")
+    print("Chat instruction 2 (fix the two body cross-refs against the corrected numbers, only),")
+    print("single-shot, run once against whichever session's renumber attempt succeeded (or the")
+    print("last attempt, if none did):")
     print(f"  {CROSSREF_INSTRUCTION[:200]}...")
     print()
-    print("Chat instruction 3 (fix the Table of Contents against the corrected numbers, only):")
+    print("Chat instruction 3 (fix the Table of Contents against the corrected numbers, only),")
+    print("single-shot:")
     print(f"  {TOC_INSTRUCTION[:200]}...")
     print()
     print("Split into three narrow, single-purpose turns rather than two: an earlier run bundled")
@@ -217,8 +238,9 @@ def print_dry_run() -> None:
     print("updated (8 and 9 respectively); TOC has 10 correct entries, no stale title, no stale")
     print("number, no missing entry.")
     print()
-    print("API calls this would make for real: 1 upload, 3 chat turns (+ approvals), 1 export.")
-    print("No cross_session_search used -- single document, single session throughout.")
+    print(f"API calls this would make for real: 1-{MAX_RENUMBER_ATTEMPTS} uploads + renumber turns")
+    print("(1 per attempt, until one verifies correct or the cap is hit), plus 2 more chat turns")
+    print("(crossref, TOC) and 1 export. No cross_session_search used anywhere.")
     print("Re-run without --dry-run once this plan looks right.")
 
 
@@ -236,6 +258,26 @@ SECTION_TITLES_IN_ORDER = [
     "TERMINATION",
     "MISCELLANEOUS PROVISIONS",
 ]
+
+
+def verify_headings(html: str) -> dict:
+    """Narrow check used by the renumber retry loop: just the heading numbers
+    and titles, not cross-refs or TOC (those haven't run yet at this point)."""
+    headings = re.findall(r"SECTION\s+(\d+)\s*[—\-]\s*([A-Z ,&]+?)(?:</h\d>|\n)", html)
+    heading_numbers = [int(n) for n, _ in headings]
+    found_titles = [t.strip().rstrip(".") for _, t in headings]
+    expected_numbers = list(range(1, 11))
+    numbers_correct = heading_numbers == expected_numbers
+    titles_correct = len(found_titles) == 10 and all(
+        SECTION_TITLES_IN_ORDER[i] in found_titles[i] for i in range(min(10, len(found_titles)))
+    )
+    return {
+        "found_numbers": heading_numbers,
+        "found_titles": found_titles,
+        "numbers_correct": numbers_correct,
+        "titles_correct": titles_correct,
+        "correct": numbers_correct and titles_correct,
+    }
 
 
 def verify(html: str) -> dict:
@@ -324,14 +366,36 @@ def main() -> None:
         sys.exit(1)
     client = Client(api_key)
 
-    session_id = f"self-heal-{uuid.uuid4()}"
-    log(f"session: {session_id}")
-    client.upload_document(CONTENT_DIR / "manual.html", session_id, open_mode="replace")
-    log("  opened manual.html")
+    # --- renumber: verify-then-retry, fresh session + fresh document each attempt ---
+    attempts_log = []
+    session_id = None
+    for attempt in range(1, MAX_RENUMBER_ATTEMPTS + 1):
+        attempt_session = f"self-heal-{uuid.uuid4()}"
+        log(f"renumber attempt {attempt}/{MAX_RENUMBER_ATTEMPTS}, session: {attempt_session}")
+        client.upload_document(CONTENT_DIR / "manual.html", attempt_session, open_mode="replace")
+        job = client.start_chat(RENUMBER_INSTRUCTION, attempt_session, approval_mode="ask_every_time")
+        client.wait_for_job(attempt_session, job["job_id"], f"renumber (attempt {attempt})")
 
-    log("renumbering Section headings")
-    job = client.start_chat(RENUMBER_INSTRUCTION, session_id, approval_mode="ask_every_time")
-    client.wait_for_job(session_id, job["job_id"], "renumber")
+        docs = client.session_documents(attempt_session, include_html=True)
+        html = find_document_html(docs, "manual")
+        check = verify_headings(html)
+        attempts_log.append({"attempt": attempt, "session_id": attempt_session, **check})
+        log(f"  attempt {attempt} numbers: {check['found_numbers']}  correct: {check['correct']}")
+
+        if check["correct"]:
+            session_id = attempt_session
+            log(f"  attempt {attempt} verified correct, proceeding with this session")
+            break
+        elif attempt < MAX_RENUMBER_ATTEMPTS:
+            log(f"  attempt {attempt} failed verification, discarding and retrying fresh")
+        else:
+            log(f"  attempt {attempt} failed verification, cap reached -- proceeding anyway with")
+            log("  this session's (incorrect) result, to see how the rest of the pipeline handles it")
+            session_id = attempt_session
+
+    (OUTPUT_DIR / "renumber_attempts.json").write_text(json.dumps(attempts_log, indent=2), encoding="utf-8")
+    converged = any(a["correct"] for a in attempts_log)
+    log(f"renumber retry summary: {len(attempts_log)} attempt(s), converged to a correct result: {converged}")
 
     log("fixing cross-references")
     job = client.start_chat(CROSSREF_INSTRUCTION, session_id, approval_mode="ask_every_time")
@@ -345,6 +409,8 @@ def main() -> None:
     html = find_document_html(docs, "manual")
 
     result = verify(html)
+    result["renumber_attempts"] = attempts_log
+    result["renumber_converged"] = converged
     log("verification:")
     for name, detail in result["details"].items():
         log(f"  {name}: {json.dumps(detail)}")

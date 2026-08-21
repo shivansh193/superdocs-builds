@@ -5,24 +5,29 @@ Supplementary Conditions, and two Exhibits into one effective document
 effective document against a risk playbook -- indemnity, damages waiver,
 notice periods, payment terms, termination for convenience.
 
-Two things are deliberately engineered to be independently verifiable,
-not just plausible-looking:
+The playbook was originally established in a *separate* prior session and
+referenced only via `cross_session_search: true` in the redline step, to
+prove the search genuinely retrieved it rather than the model pattern-
+matching generic contract norms. That version is preserved as history in
+PROGRESS.md: it surfaced a real SuperDocs bug (`cross_session_search` can
+silently re-open a stale, pre-reconciliation snapshot of a document
+already open in the same session, so an "approved" edit never actually
+lands). This version implements the known mitigation instead -- the
+playbook is uploaded into the *main* session as a background document,
+the same pattern already used for the two Exhibits, so nothing needs
+cross-session retrieval at all. This trades away one evidentiary property
+(proof the retrieval was genuinely cross-session) for a working redline
+step. The other evidentiary property below still holds either way.
 
-1. The risk playbook is established in a *separate* prior session and
-   referenced only via `cross_session_search: true` in the redline step --
-   never re-pasted into the redline instruction. Its thresholds are
-   arbitrary, non-"standard" numbers (11 business days, 23 days, 17 days --
-   not the round 10/14/30 a model would guess from generic contract
-   knowledge). A correct flag against one of these specific numbers is
-   evidence the search genuinely retrieved the playbook, not that the
-   model pattern-matched typical contract norms.
-
-2. The base agreement's payment term (45 days) genuinely violates the
-   playbook's threshold (>23 days) on its own -- but the Supplementary
-   Conditions amend it to 21 days, which is compliant. If the final
-   redline treats payment terms as compliant, that's evidence real
-   reconciliation happened *before* redlining, not that the base
-   document was redlined in isolation while ignoring the amendment.
+The base agreement's payment term (45 days) genuinely violates the
+playbook's threshold (>23 days) on its own -- but the Supplementary
+Conditions amend it to 21 days, which is compliant. If the final redline
+treats payment terms as compliant, that's evidence real reconciliation
+happened *before* redlining, not that the base document was redlined in
+isolation while ignoring the amendment. Its thresholds are also arbitrary,
+non-"standard" numbers (11 business days, 23 days, 17 days -- not the
+round 10/14/30 a model would guess from generic contract knowledge), so a
+correct flag still isn't just pattern-matching typical contract norms.
 
 Run `python build.py --dry-run` first: prints the full plan (uploads,
 exact chat instructions, what verification will check) with zero API
@@ -150,36 +155,38 @@ RECONCILE_INSTRUCTION = (
 )
 
 REDLINE_INSTRUCTION = (
-    "Search your memory of previous sessions for a document called the Meridian Builders Owner Contract "
-    "Risk Playbook, and retrieve its content -- do not ask me what it says. It lists five numbered risk "
-    "categories, each with one specific numeric threshold. Work through the five categories one at a time, "
-    "in order. For each one: find the Article in this document that covers that category, compare this "
-    "document's actual current term for it against that category's threshold, and only if it violates the "
-    "threshold, insert one new paragraph directly after that Article's text: start it with the literal text "
-    "'RISK FLAG:', explain which threshold is violated and by how much, and make the whole paragraph red "
-    "using style=\"color:#b00\". If a category's term already meets the threshold, insert nothing for it and "
-    "move to the next category. Some of the five will need a flag and some won't."
+    "There is another document open in this session called risk_playbook. Read it specifically. It lists "
+    "five numbered risk categories, each with one specific numeric threshold. Work through the five "
+    "categories one at a time, in order. For each one: find the Article in THIS document (not "
+    "risk_playbook) that covers that category, compare this document's actual current term for it against "
+    "that category's threshold, and only if it violates the threshold, insert one new paragraph directly "
+    "after that Article's text: start it with the literal text 'RISK FLAG:', explain which threshold is "
+    "violated and by how much, and make the whole paragraph red using style=\"color:#b00\". If a category's "
+    "term already meets the threshold, insert nothing for it and move to the next category. Some of the "
+    "five will need a flag and some won't. Do not edit risk_playbook itself."
 )
 
 
 def print_dry_run() -> None:
     print("=== DRY RUN -- no API calls will be made ===\n")
-    print("Documents that would be uploaded to a setup session (session A):")
-    print(f"  - {CONTENT_DIR / 'risk_playbook.html'}")
+    print("Mitigated version: no setup session, no cross_session_search. The risk playbook goes into the")
+    print("main session as a fifth background document, same pattern as the two Exhibits.")
     print()
-    print("Documents that would be uploaded to the main session (session B), in order:")
+    print("Documents that would be uploaded to the main session, in order:")
     for name, mode in [
         ("base_agreement.html", "replace (becomes focused)"),
         ("supplementary_conditions.html", "background"),
         ("exhibit_a_scope.html", "background"),
         ("exhibit_b_insurance.html", "background"),
+        ("risk_playbook.html", "background"),
     ]:
         print(f"  - {CONTENT_DIR / name}  [{mode}]")
     print()
     print("Chat instruction 1 (reconcile, targets the focused base_agreement doc, no document_id set):")
     print(f"  {RECONCILE_INSTRUCTION[:200]}...")
     print()
-    print("Chat instruction 2 (redline, same focused doc, cross_session_search=true):")
+    print("Chat instruction 2 (redline, same focused doc, playbook read from the same session, no")
+    print("cross_session_search):")
     print(f"  {REDLINE_INSTRUCTION[:200]}...")
     print()
     print("Expected verification result (against the source documents as authored):")
@@ -191,7 +198,7 @@ def print_dry_run() -> None:
     print("                    compliant with the 23-day threshold -- this is the reconciliation check")
     print("  NO FLAG expected: Article 9 (termination) -- 30 days >= 17-day threshold")
     print()
-    print("API calls this would make for real: 5 uploads, 2 chat turns (+ approvals), 1-2 exports.")
+    print("API calls this would make for real: 5 uploads, 2 chat turns (+ approvals), 1 export.")
     print("Re-run without --dry-run once this plan looks right.")
 
 
@@ -223,11 +230,22 @@ def verify(html: str) -> dict:
         "payment_terms_flagged": ("Article 5", False),
         "termination_flagged": ("Article 9", False),
     }
+    # Each Article's window is bounded by the *next* "Article N" heading (or end of
+    # document), not a fixed character count -- a fixed window can overrun into the
+    # next Article's own RISK FLAG and misattribute it, which a short, unflagged
+    # Article immediately followed by a flagged one will actually trigger.
+    all_article_starts = sorted(m.start() for m in re.finditer(r"Article\s+\d+", html, re.IGNORECASE))
+
     results = {}
     for check_name, (article, should_be_flagged) in checks.items():
         m = re.search(re.escape(article), html, re.IGNORECASE)
         idx = m.start() if m else -1
-        window = html[idx : idx + 1200] if idx != -1 else ""
+        if idx == -1:
+            window = ""
+        else:
+            next_starts = [s for s in all_article_starts if s > idx]
+            end = next_starts[0] if next_starts else len(html)
+            window = html[idx:end]
         has_flag = "RISK FLAG" in window
         results[check_name] = {
             "article_found": idx != -1,
@@ -266,18 +284,7 @@ def main() -> None:
         sys.exit(1)
     client = Client(api_key)
 
-    # --- setup session: establish the risk playbook for cross-session search ---
-    setup_session = f"playbook-setup-{uuid.uuid4()}"
-    log(f"setup session: {setup_session}")
-    client.upload_document(CONTENT_DIR / "risk_playbook.html", setup_session, open_mode="replace")
-    job = client.start_chat(
-        "Read this risk playbook and confirm you understand it. Just summarize the five categories in one line each.",
-        setup_session,
-        approval_mode="auto-apply",
-    )
-    client.wait_for_job(setup_session, job["job_id"], "playbook setup")
-
-    # --- main session: open all four contract documents together ---
+    # --- main session: open all five documents together, playbook included ---
     main_session = f"redline-{uuid.uuid4()}"
     log(f"main session: {main_session}")
     for name, mode in [
@@ -285,6 +292,7 @@ def main() -> None:
         ("supplementary_conditions.html", "background"),
         ("exhibit_a_scope.html", "background"),
         ("exhibit_b_insurance.html", "background"),
+        ("risk_playbook.html", "background"),
     ]:
         client.upload_document(CONTENT_DIR / name, main_session, open_mode=mode)
         log(f"  opened {name} ({mode})")
@@ -293,8 +301,8 @@ def main() -> None:
     job = client.start_chat(RECONCILE_INSTRUCTION, main_session, approval_mode="ask_every_time")
     client.wait_for_job(main_session, job["job_id"], "reconciliation")
 
-    log("redlining against the risk playbook (cross-session search, playbook not re-pasted)")
-    job = client.start_chat(REDLINE_INSTRUCTION, main_session, approval_mode="ask_every_time", cross_session_search=True)
+    log("redlining against the risk playbook (same-session document, no cross_session_search)")
+    job = client.start_chat(REDLINE_INSTRUCTION, main_session, approval_mode="ask_every_time")
     client.wait_for_job(main_session, job["job_id"], "redline")
 
     docs = client.session_documents(main_session, include_html=True)

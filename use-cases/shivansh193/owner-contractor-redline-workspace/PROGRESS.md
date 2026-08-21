@@ -124,3 +124,57 @@ Overall: **FAIL** (4 of 6 checks correct). The hardest check --
 reconciliation actually landing before redlining ran -- passed cleanly.
 Both failures trace to the single stale-reopen bug above, not to two
 independent problems.
+
+## 2026-08-21 -- the known mitigation, run for real: a clean pass
+
+Everything above is left exactly as it was written. This is a second,
+later result on top of it, not a replacement -- the platform bug it
+found is still real and still worth reporting on its own.
+
+Implemented the fix the redline-step bug pointed at: dropped
+`cross_session_search` entirely and uploaded `risk_playbook.html` into
+the *main* session as a fifth background document, the same pattern
+already used for the two Exhibits. `REDLINE_INSTRUCTION` now says "there
+is another document open in this session called risk_playbook" instead
+of "search your memory of previous sessions" -- otherwise unchanged.
+This trades away one of the build's two original evidentiary properties
+(proof the playbook was retrieved via genuine cross-session search,
+not re-pasted) for a redline step that actually works; the other
+property (the payment-terms reconciliation check, and the playbook's
+arbitrary, non-guessable thresholds) is untouched.
+
+Ran for real. Reconciliation this time correctly picked up all three
+Supplementary Conditions amendments (SC-1's payment term, SC-2's
+submittal-schedule addition to Article 3, SC-3's site-access addition to
+Article 10) rather than just SC-1 -- a more thorough read than either
+prior run, not a regression; every added or changed sentence carries its
+own "(As amended by SC-N)" note, and no Article's original text was lost.
+The redline step then flagged both Article 6 (notice period, 5 business
+days violates the 11-day threshold) and Article 7 (indemnification,
+one-directional) correctly, left Article 8 (damages waiver) and Article 9
+(termination) correctly unflagged, and treated Article 5's reconciled
+21-day payment term as compliant, exactly as the reconciliation-order
+check is designed to catch.
+
+**A second, unrelated bug -- this time in this repo's own `verify()`, not
+the platform.** The initial verification run reported `payment_terms_flagged:
+correct: false`, i.e. Article 5 appeared to have been wrongly flagged.
+Direct inspection of `output/final_document.html` showed no RISK FLAG
+anywhere near Article 5 at all. The cause: `verify()`'s per-Article check
+used a fixed 1200-character window after each Article's heading to look
+for a flag. Article 5's own content (heading + two short paragraphs) is
+short enough that the fixed window ran straight through Article 6's
+heading and *into Article 6's own, genuinely-correct RISK FLAG paragraph*,
+misattributing it to Article 5. Every earlier run happened not to trigger
+this, because Article 5 was either itself flagged (wrongly, by the
+platform) or the run failed before getting this far -- this is the first
+run clean enough on the platform side to expose a bug that was sitting in
+the verification script the whole time. Fixed by bounding each Article's
+window to the position of the *next* "Article N" heading instead of a
+fixed character count (confirmed via `grep -o "ARTICLE [0-9]*"` that this
+document only ever uses the heading form, no inline mid-sentence
+references, so the bound is unambiguous here). Re-ran `verify()` against
+the same, unchanged export -- no new API call needed.
+
+**Final result: PASS, 6 of 6.** `output/reconciled_and_redlined_agreement.docx`
+and `output/verification_result.json` reflect this run.

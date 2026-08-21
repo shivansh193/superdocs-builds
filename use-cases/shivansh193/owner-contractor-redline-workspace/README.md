@@ -4,11 +4,11 @@ Built by Shivansh Kalra for the SuperDocs task.
 
 Reconciles a base Owner-Contractor Agreement with its Supplementary
 Conditions into one effective document, then redlines that effective
-document against a risk playbook retrieved from a separate session --
-indemnity mutuality, damages-waiver mutuality, notice periods, payment
-terms, and termination-for-convenience notice, each against a deliberately
-non-"standard" numeric threshold (11 business days, 23 days, 17 days, not
-the round 10/14/30 a model would guess from generic contract knowledge).
+document against a risk playbook -- indemnity mutuality, damages-waiver
+mutuality, notice periods, payment terms, and termination-for-convenience
+notice, each against a deliberately non-"standard" numeric threshold (11
+business days, 23 days, 17 days, not the round 10/14/30 a model would
+guess from generic contract knowledge).
 
 All content is synthetic: a fictional owner (Riverside Medical Partners
 LLC), a fictional contractor (Meridian Builders LLC), and a fictional
@@ -16,20 +16,26 @@ internal risk playbook.
 
 Two things were deliberately engineered to be independently verifiable,
 not just plausible-looking -- see [Verified result](#verified-result) for
-which one actually held up:
+which one actually held up, and for what changed between the two real
+runs documented there:
 
-1. The risk playbook is established in a separate prior session and
-   referenced only via `cross_session_search: true` -- never re-pasted
-   into the redline instruction. A correct flag against one of its
-   specific, arbitrary thresholds would be evidence the search genuinely
-   retrieved the playbook, not that the model pattern-matched typical
-   contract norms.
+1. **Originally**: the risk playbook was established in a separate prior
+   session and referenced only via `cross_session_search: true` -- never
+   re-pasted into the redline instruction, so a correct flag against one
+   of its specific, arbitrary thresholds would be evidence the search
+   genuinely retrieved the playbook, not that the model pattern-matched
+   typical contract norms. This surfaced a real SuperDocs bug (see below)
+   and was replaced with the playbook loaded into the main session as a
+   background document instead, the same pattern used for the two
+   Exhibits -- trading that specific evidentiary property for a redline
+   step that actually works.
 2. The base agreement's payment term (45 days) genuinely violates the
    playbook's threshold (>23 days) on its own -- but the Supplementary
    Conditions amend it to 21 days, which is compliant. If the final
    document treats payment terms as compliant, that's evidence real
    reconciliation happened *before* redlining, not that the base document
-   was redlined in isolation while ignoring the amendment.
+   was redlined in isolation while ignoring the amendment. This property
+   is untouched by the fix above and still holds.
 
 ## What it does
 
@@ -41,11 +47,11 @@ which one actually held up:
    Conditions, find its numbered amendments, and edit the corresponding
    Articles in the base agreement in place -- every other Article must
    stay present and unchanged.
-4. **Redline step**: instructs SuperDocs to retrieve the risk playbook via
-   `cross_session_search`, check the now-reconciled document's actual
-   terms against each of the playbook's five thresholds in turn, and
-   insert a red `RISK FLAG:` paragraph after any Article that violates
-   its threshold.
+4. **Redline step**: instructs SuperDocs to read the risk playbook (open
+   in the same session as a background document), check the
+   now-reconciled document's actual terms against each of the playbook's
+   five thresholds in turn, and insert a red `RISK FLAG:` paragraph after
+   any Article that violates its threshold.
 5. Exports the result as `.docx` and verifies it programmatically against
    six checks (five per-Article flag/no-flag expectations plus the
    reconciliation check itself) by inspecting the real returned HTML, not
@@ -65,9 +71,8 @@ python build.py           # runs it for real: ~5 uploads, 2 chat turns, 1 export
 ## SuperDocs features used
 
 - **Multi-document sessions** (`open_mode: "replace"` / `"background"`) --
-  four related contract documents open together, one focused
-- **Cross-session memory + `cross_session_search`** -- the risk playbook
-  lives in a separate session and is retrieved by search, not re-pasted
+  five related documents open together (base agreement, Supplementary
+  Conditions, two Exhibits, risk playbook), one focused
 - **Chat / async edit** (`POST /v1/chat/async`) with
   `approval_mode: "ask_every_time"` across two sequential instructions on
   the same focused document
@@ -124,20 +129,50 @@ bug above, not to two independent problems -- and the check that was
 actually the point of the exercise (real reconciliation before redlining)
 passed cleanly.
 
+### Later result: the mitigation, run for real
+
+Dropped `cross_session_search` and loaded the playbook into the main
+session as a background document instead (the same pattern already used
+for the Exhibits). Ran again for real:
+
+| Check | Expected | Actual | Result |
+|---|---|---|---|
+| Article 7 (indemnification) flagged | yes | yes | PASS |
+| Article 6 (notice period) flagged | yes | yes | PASS |
+| Article 8 (damages waiver) flagged | no | no | PASS |
+| Article 5 (payment terms) flagged | no | no | PASS |
+| Article 9 (termination) flagged | no | no | PASS |
+| Reconciliation applied (21 days, not 45) | yes | yes | PASS |
+
+Overall: **PASS, 6 of 6.** Reconciliation this run also picked up two
+further Supplementary Conditions amendments (a submittal-schedule
+addition and a site-access clause) that earlier runs had judged as new
+obligations rather than amendments -- a more thorough read, not a
+regression; every Article is still present and every change carries its
+own "(As amended by SC-N)" note.
+
+One verification-script bug turned up along the way, in this repo's own
+`verify()`, not the platform: it checked each Article for a nearby
+`RISK FLAG` using a fixed 1200-character window, which was short enough
+that Article 5's window ran into Article 6's own (correct) flag and
+misattributed it, briefly reporting a false failure. Fixed by bounding
+each Article's window to the next Article heading instead of a fixed
+length. Full trace in [`PROGRESS.md`](PROGRESS.md).
+
+This result doesn't replace the one above -- the bug that first run found
+is real and still worth reporting on its own; this is what fixing it
+looks like once you actually apply the known mitigation.
+
 ## Honest limitations
 
-- The redline step does not reliably produce risk flags today because of
-  the platform bug described above. Re-running without
-  `cross_session_search` (uploading the playbook into the main session as
-  a background document instead, the same pattern used for the Exhibits)
-  would very likely produce a clean pass, but that would remove the part
-  of the design meant to prove genuine cross-session retrieval rather
-  than pattern-matched generic contract knowledge -- left as-is rather
-  than quietly working around the bug it was built to demonstrate.
+- The original `cross_session_search` design (proof the playbook was
+  retrieved via genuine cross-session search, not re-pasted) was traded
+  away to get a working redline step -- see the two results above for
+  why. The reconciliation-order evidentiary property is untouched.
 - `output/` is gitignored; run `python build.py` to regenerate
-  `reconciled_and_redlined_agreement.docx` (reflects the correctly
-  reconciled, not-yet-redlined state), `final_document.html`, and
-  `verification_result.json`.
+  `reconciled_and_redlined_agreement.docx`, `final_document.html`, and
+  `verification_result.json` -- reflects the mitigated version's PASS
+  result as of the current `build.py`.
 
 ## Files
 
